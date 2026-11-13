@@ -1,0 +1,11 @@
+# Core Utilities
+lodash
+async
+uuid
+
+# Frameworks
+express
+react
+vue
+
+# Add the rest of your 1000+ packages below

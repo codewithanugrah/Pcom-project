@@ -235,21 +235,26 @@ async def process_package(package_name, session):
     return package_rows
 
 async def main():
-    test_packages = ['lodash', 'express']
-    print("Executing Depth Pivot ETL pipeline (Local Timeline Slicing)...")
+    # Load packages from external text file, ignoring comments and blank lines
+    with open("packages.txt", "r") as f:
+        target_packages = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        
+    print(f"Executing Depth Pivot ETL for {len(target_packages)} packages...")
     
     async with aiohttp.ClientSession() as session:
-        tasks = [process_package(pkg, session) for pkg in test_packages]
+        # Note: For 1000+ packages, you might want to chunk these rather than 
+        # firing 1000 concurrent GraphQL extraction tasks at once.
+        # But aiohttp limits connections automatically, so this will still execute safely.
+        tasks = [process_package(pkg, session) for pkg in target_packages]
         results_lists = await asyncio.gather(*tasks)
         
         # Flatten the list of lists
         all_rows = [row for package_rows in results_lists for row in package_rows]
         
         df = pd.DataFrame(all_rows)
-        # Handle zero-inflation for missing historical blocks
         df = df.fillna(0)
-        df.to_csv("training_dataset_depth_pivot.csv", index=False)
-        print(f"\nSuccess! Exported {len(all_rows)} version-specific rows to training_dataset_depth_pivot.csv")
+        df.to_csv("training_dataset.csv", index=False)
+        print(f"\nSuccess! Exported {len(all_rows)} version-specific rows to training_dataset.csv")
 
 if __name__ == "__main__":
     asyncio.run(main())
