@@ -1,62 +1,103 @@
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+import optuna
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import mean_squared_error, mean_absolute_error
+from sklearn.metrics import mean_absolute_error
+import warnings
 
-# 1. Load the scaled dataset
-df = pd.read_csv("training_dataset.csv")
+# Suppress warnings
+warnings.filterwarnings('ignore')
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-# 2. Separate features, targets, and group constraints
-exclude_cols = ['package_name', 'version', 'purl', 'published_at']
+# 1. Load your comprehensive engineered dataset
+df = pd.read_csv("training_dataset_engineered.csv", keep_default_na=False)
+df = df.dropna(subset=['package_name'])
+
+exclude_cols = ['package_name', 'version', 'purl', 'published_at', 'package_created_at']
 target_cols = [c for c in df.columns if c.startswith('target_ghsa_')]
 
-X = df.drop(columns=exclude_cols + target_cols)
+X = df.drop(columns=[c for c in exclude_cols + target_cols if c in df.columns], errors='ignore')
+X = X.fillna(0)
+
 groups = df['package_name']
+print(f"Loaded {df.shape[0]} rows across {groups.nunique()} packages.")
+print("Running in Optuna-Only Mode on GPU (CUDA)...")
 
-print(f"Loaded {df.shape[0]} rows across {df['package_name'].nunique()} packages.")
+# Dictionary to store the winning parameters for the final output
+final_params_dict = {}
 
-# 3. Train and evaluate for each severity constraint
+# 2. Tune for each severity
 for target in target_cols:
     y = df[target]
-    print(f"\n--- Predicting {target} ---")
-    
+
+    print(f"\n{'=' * 50}")
+    print(f"Tuning Hyperparameters for: {target}")
+    print(f"{'=' * 50}")
+
     if y.sum() == 0:
-        print("No vulnerabilities observed for this severity in the dataset. Skipping.")
+        print("No vulnerabilities observed in the training set. Skipping.")
         continue
 
-    # Standard 5-fold cross validation for the larger dataset
-    gkf = GroupKFold(n_splits=5) 
-    
-    rmse_scores = []
-    mae_scores = []
-    
-    for fold, (train_idx, test_idx) in enumerate(gkf.split(X, y, groups)):
-        X_train, y_train = X.iloc[train_idx], y.iloc[train_idx]
-        X_test, y_test = X.iloc[test_idx], y.iloc[test_idx]
-        
-        # 4. CPU-Optimized XGBoost
-        model = xgb.XGBRegressor(
-            objective='count:poisson',
-            tree_method='hist', # Highly efficient on CPU
-            n_jobs=-1,          # Utilize all CPU cores
-            n_estimators=300,   # Increased capacity to learn from more packages
-            learning_rate=0.03,
-            max_depth=5,
-            random_state=42
-        )
-        
-        model.fit(X_train, y_train)
-        preds = model.predict(X_test)
-        
-        # 5. Evaluate strictly on RMSE and MAE
-        rmse = np.sqrt(mean_squared_error(y_test, preds))
-        mae = mean_absolute_error(y_test, preds)
-        
-        rmse_scores.append(rmse)
-        mae_scores.append(mae)
-        
-        print(f"Fold {fold+1} | RMSE: {rmse:.4f} | MAE: {mae:.4f}")
-        
-    print(f"Average RMSE: {np.mean(rmse_scores):.4f}")
-    print(f"Average MAE: {np.mean(mae_scores):.4f}")
+    # Bypass Optuna entirely for the synthetic unknown target
+    if target == 'target_ghsa_unknown_count_90d':
+        print("Synthetic target detected. Skipping optimization.")
+        continue
+
+    # --- OPTUNA HYPERPARAMETER TUNING ---
+    print("Running Optuna Search (100 Trials) using 3-Fold CV on GPU...")
+
+
+    def objective(trial):
+        param = {
+            'objective': 'reg:tweedie',
+            'tree_method': 'hist',
+            'device': 'cuda',  # GPU Acceleration
+            'random_state': 42,
+            'max_depth': trial.suggest_int('max_depth', 3, 8),
+            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+            'n_estimators': trial.suggest_int('n_estimators', 100, 400, step=50),
+            'tweedie_variance_power': trial.suggest_float('tweedie_variance_power', 1.1, 1.9),
+            'max_delta_step': trial.suggest_int('max_delta_step', 0, 3)
+        }
+
+        gkf = GroupKFold(n_splits=3)
+        cv_mae = []
+
+        for t_idx, v_idx in gkf.split(X, y, groups):
+            X_t, y_t = X.iloc[t_idx], y.iloc[t_idx]
+            X_v, y_v = X.iloc[v_idx], y.iloc[v_idx]
+
+            weights_t = np.where(y_t > 0, 50.0, 1.0)
+
+            model = xgb.XGBRegressor(**param)
+            model.fit(X_t, y_t, sample_weight=weights_t)
+            preds = model.predict(X_v)
+
+            # Safety net: Prune trial if gradient explosion causes NaNs
+            if np.isnan(preds).any():
+                raise optuna.TrialPruned("Gradient explosion detected. Pruning unstable trial.")
+
+            cv_mae.append(mean_absolute_error(y_v, preds))
+
+        return np.mean(cv_mae)
+
+
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective, n_trials=100)
+
+    best_params = study.best_params
+    print(f"✅ Optuna Found Best Params: {best_params}")
+
+    # Store the winning dictionary
+    final_params_dict[target] = best_params
+
+# --- FINAL OUTPUT GENERATION ---
+print("\n" + "=" * 50)
+print("🎉 ALL OPTIMIZATIONS COMPLETE!")
+print("Copy and paste this exact dictionary into your train_ensemble.py script:\n")
+print("best_params_dict = {")
+for key, value in final_params_dict.items():
+    print(f"    '{key}': {value},")
+print("}")
+print("=" * 50 + "\n")
