@@ -1,74 +1,66 @@
-# PCOM: Predictive Vulnerability Count Pipeline (DevSecOps ML)
+# ML Competition – Student Prediction API Template
 
-A robust, schema-compliant machine learning pipeline designed to predict future 90-day software vulnerability counts for NPM packages. Built for the Predictive Compliance and Operations (PCOM) project, this architecture models vulnerability occurrences as rare discrete events using Poisson regression, strictly enforcing chronological data leakage prevention and rapid inference constraints.
+This repository provides a minimal FastAPI template for participating in an ML Competition.
+During each evaluation round, the competition service calls your `/predict` endpoint with a download URL (for the test input CSV) and an upload URL (to submit your predicted CSV).
 
----
+## Project Structure
 
-## 🚀 Project Overview
-
-Predicting open-source supply chain risk requires accounting for zero-inflated target distributions and temporal dependencies. This project automates the extraction of historical GitHub issue/PR velocity, NPM metadata, package sizes, download volumes, and past security advisories (GHSA) to train a highly generalized Extreme Gradient Boosting (XGBoost) regression model.
-
----
-
-## 📂 Inputs & Outputs
-
-### Input Schema
-The pipeline accepts tabular CSV data adhering to the defined PCOM record schema, containing:
-* **Metadata & Identifiers:** `package_name`, `version`, `purl`, `published_at`, `package_created_at`.
-* **Repository Size & Dependencies:** `unpacked_size`, `file_count`, `dependency_count`, `dev_dependency_count`, etc.
-* **Rolling 12-Month Windows ( $M0$ to $M11$ ):** Monthly historical metrics tracking opened/closed issues, merged/closed pull requests, stable release counts, download volumes (`package_downloads_M0` to `M11`), and past vulnerability counts.
-
-### Output Schema
-The rapid inference script outputs a single-row (or multi-row) CSV containing strictly the prediction goal metrics required by the evaluation rubric:
-* `target_ghsa_low_count_90d`
-* `target_ghsa_moderate_count_90d`
-* `target_ghsa_high_count_90d`
-* `target_ghsa_critical_count_90d`
-* `target_ghsa_unknown_count_90d`
+- `main.py` – FastAPI server (`/health` and `/predict` endpoints) and `run_model(df)` where you integrate your trained ML model.
+- `pyproject.toml` / `requirements.txt` – Python dependencies (`fastapi`, `uvicorn`, `pandas`, `requests`).
+- `Dockerfile` – Container setup for easy deployment on a VM.
 
 ---
 
-## 🛠️ Techniques & Methodologies
+## 1. Integrate Your Model
 
-1. **The "Depth Pivot" Time-Series Architecture:** Flattens package histories so that every stable version acts as an independent training instance, anchored precisely to its `published_at` timestamp with a 12-month backward-looking feature window ( $M0$ to $M11$ ) and a 90-day forward-looking target window.
-2. **Poisson Distribution Regression (`count:poisson`):** Tailored specifically for modeling rare, non-negative event counts, preventing invalid negative predictions and accurately mapping distance-to-target metrics.
-3. **Severe Data Leakage Prevention:** Employs `GroupKFold` and `GroupShuffleSplit` grouped strictly by `package_name`, ensuring the model generalizes across entirely unseen repositories rather than memorizing minor version patches.
-4. **Optimized Local Execution:** Utilizes CPU-optimized histogram-based gradient boosting (`tree_method='hist'`) on Apple Silicon M2 Pro architecture for rapid training and instant inference.
+Open `main.py` and replace the example code inside `run_model(df: pd.DataFrame)` with your trained model's inference logic.
+
+**Important Rules:**
+1. The input CSV (`df`) provides a comma-separated time-series of metrics for a package (multiple rows, US decimal format `.`).
+2. `run_model(df)` must return a **single-row DataFrame (`len(prediction_df) == 1`)** whose column headers exactly match the target headers specified in the competition description.
+3. All predicted numeric values must be valid integers or US-format floats (`.` as decimal separator, no `NaN` / empty values).
+4. If your model requires additional Python libraries (e.g., `scikit-learn`, `xgboost`, `torch`, `joblib`), add them to `requirements.txt` and `pyproject.toml` (`uv add <package>`).
 
 ---
 
-## ⚙️ How to Run the Project
+## 2. Run Locally
 
-### Prerequisites
-* Python 3.10+
-* Virtual environment (`venv`) activated
-* GitHub Personal Access Token (exported as an environment variable for the ETL phase):
-  ```bash
-  export GITHUB_TOKEN="your_github_token_here"
-  ```
-
-### 1. Install Dependencies
+### Option A: Using `uv`
 ```bash
-pip install pandas numpy xgboost scikit-learn aiohttp semver
+uv sync
+uv run main.py
 ```
 
-### 2. Run the ETL Pipeline (Data Extraction)
-To extract historical data for packages listed in `packages.txt`:
+### Option B: Using `pip`
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 python main.py
 ```
-*(Features incremental disk checkpointing, asynchronous concurrency semaphores, and automatic GitHub rate-limit handling).*
 
-### 3. Train the Models
-To execute cross-validation, evaluate on unseen test splits, and bake the final severity-specific weights into disk:
+Verify that the health check responds at `http://localhost:8000/health`:
 ```bash
-python train.py
+curl http://localhost:8000/health
+# Expected response: {"health":"up"}
 ```
-This generates the required model weight files: `xgb_model_target_ghsa_*_count_90d.json`.
 
-### 4. Run Rapid Inference (Competition Mode)
-To evaluate incoming test data and generate the required competition output within the strict 10-second runtime limit:
+---
+
+## 3. Deploy on Your Public VM
+
+Make sure port `8000` (or the port you choose) is open in your VM's firewall (`sudo ufw allow 8000/tcp`).
+
+### Option A: Run with Docker (Recommended – runs in background)
 ```bash
-python predict.py test_input.csv
+docker build -t ml-prediction-api .
+docker run -d --name ml-api --restart unless-stopped -p 8000:8000 ml-prediction-api
 ```
-This reads `test_input.csv`, evaluates predictions in milliseconds, and outputs `prediction_output.csv`.
+
+### Option B: Run directly with `uv` / `uvicorn`
+```bash
+uv sync
+nohup uv run uvicorn main:app --host 0.0.0.0 --port 8000 > server.log 2>&1 &
+```
+
+Once running, register your VM's base URL (e.g. `http://<your-vm-ip>:8000`) in the Competition Submission tab of Happy Go Lucky.

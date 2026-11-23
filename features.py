@@ -1,5 +1,7 @@
+import re
 import numpy as np
 import pandas as pd
+from packaging.version import Version, InvalidVersion
 
 SEVERITIES = ["low", "moderate", "high", "critical", "unknown"]
 TARGET_COLS = [f"target_ghsa_{s}_count_90d" for s in SEVERITIES]
@@ -9,6 +11,63 @@ _DECAY_WEIGHTS = np.exp(-0.25 * np.arange(12))  # M0=1.0, M1=0.78, ..., M11=0.06
 _FAST_DECAY = np.exp(-0.60 * np.arange(12))  # Active burst (M0..M2)
 _SLOW_DECAY = np.exp(-0.10 * np.arange(12))  # Chronic risk (M0..M11)
 _TIME_X = np.arange(12, dtype=float)  # 0 (M11) -> 11 (M0)
+
+PURL_ALIASES = ["package_url", "package_purl", "pkg_purl", "purl_id", "package", "id"]
+
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cleans column names so small naming differences, BOM marks, or case variations
+    do not break feature engineering.
+    """
+    df = df.copy()
+    # Strip BOM and whitespace, convert to lowercase
+    df.columns = [str(c).replace("\ufeff", "").replace("﻿", "").strip().lower() for c in df.columns]
+
+    renames = {}
+    for c in df.columns:
+        new = c
+        # Fix legacy issue count naming: issues_opened_count_m0 -> issues_opened_M0
+        new = re.sub(r"^(issues_(?:opened|closed|reopened))_count_m(\d+)$", r"\1_m\2", new)
+        # Fix plural vs singular typo: package_downloads_days_observed -> package_download_days_observed
+        new = re.sub(r"^package_downloads_days_observed_", "package_download_days_observed_", new)
+        if new == "created_at":
+            new = "package_created_at"
+        # The schema convention writes the monthly windows as uppercase _M0 ... _M11
+        new = re.sub(r"_m(\d+)$", lambda m: "_M" + m.group(1), new)
+        if new != c:
+            renames[c] = new
+    df = df.rename(columns=renames)
+
+    # Check for PURL under aliases if "purl" not found
+    if "purl" not in df.columns:
+        for alt in PURL_ALIASES:
+            if alt in df.columns and df[alt].astype(str).str.startswith("pkg:").any():
+                df = df.rename(columns={alt: "purl"})
+                break
+    return df
+
+
+def parse_stable_semver(purl_or_version: str):
+    """
+    Parses a version string or purl into (is_stable, parsed_version).
+    Extracts version from purl if needed (e.g. pkg:npm/@scope/name@1.2.3 -> 1.2.3).
+    Returns (is_stable: bool, version_obj: Version | None).
+    """
+    if not isinstance(purl_or_version, str):
+        return False, None
+    raw = purl_or_version.strip()
+    if raw.startswith("pkg:"):
+        raw = raw.replace("%40", "@")
+        if "@" in raw.lstrip("@"):
+            raw = raw.rsplit("@", 1)[1]
+    raw = raw.lstrip("v").strip()
+    try:
+        v = Version(raw)
+        is_stable = not (v.is_prerelease or v.is_devrelease)
+        return is_stable, v
+    except (InvalidVersion, ValueError, TypeError):
+        return False, None
 
 
 def _safe_div(num: float, den: float, default: float = 0.0) -> float:
@@ -45,19 +104,47 @@ def transform_package_df(
     into a single engineered feature dictionary.
     Works identically on training snapshots and unseen test Input.csv files.
     """
+    df = normalize_columns(pkg_df)
+
     if cutoff_date is None:
-        cutoff = DEFAULT_TEST_CUTOFF
+        if "snapshot_cutoff" in df.columns and df["snapshot_cutoff"].notna().any():
+            cutoff = pd.Timestamp(str(df["snapshot_cutoff"].dropna().iloc[0]))
+        else:
+            cutoff = DEFAULT_TEST_CUTOFF
     else:
         cutoff = pd.Timestamp(cutoff_date)
-        if cutoff.tzinfo is None:
-            cutoff = cutoff.tz_localize("UTC")
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.tz_localize("UTC")
 
-    df = pkg_df.copy()
-    df["_pub_dt"] = pd.to_datetime(df["published_at"], utc=True, errors="coerce")
-    df = df.sort_values("_pub_dt").reset_index(drop=True)
+    # Safe datetime parsing
+    if "published_at" in df.columns:
+        df["_pub_dt"] = pd.to_datetime(df["published_at"], utc=True, errors="coerce")
+    else:
+        df["_pub_dt"] = pd.NaT
 
-    first_row = df.iloc[0]
-    last_row = df.iloc[-1]
+    # Semantic version ranking if purl or version column is available
+    ver_col = "purl" if "purl" in df.columns else ("version" if "version" in df.columns else None)
+    if ver_col:
+        parsed_info = df[ver_col].apply(parse_stable_semver)
+        df["_is_stable"] = parsed_info.apply(lambda x: x[0])
+        df["_semver"] = parsed_info.apply(lambda x: x[1])
+
+        stable_df = df[df["_is_stable"] & df["_semver"].notna()]
+        if len(stable_df) > 0:
+            df_for_anchor = stable_df
+        else:
+            df_for_anchor = df[df["_semver"].notna()] if df["_semver"].notna().any() else df
+
+        if len(df_for_anchor) > 0 and df_for_anchor["_semver"].notna().any():
+            latest_idx = df_for_anchor["_semver"].idxmax()
+        else:
+            latest_idx = df["_pub_dt"].idxmax() if df["_pub_dt"].notna().any() else df.index[-1]
+    else:
+        latest_idx = df["_pub_dt"].idxmax() if df["_pub_dt"].notna().any() else df.index[-1]
+
+    first_idx = df["_pub_dt"].idxmin() if df["_pub_dt"].notna().any() else df.index[0]
+    first_row = df.loc[first_idx]
+    last_row = df.loc[latest_idx]
     n_versions = len(df)
 
     feats = {}
@@ -65,10 +152,15 @@ def transform_package_df(
     # =========================================================================
     # BLOCK 1: VERSION TRAJECTORY & CODEBASE BLOAT
     # =========================================================================
-    created_dt = pd.to_datetime(first_row["package_created_at"], utc=True, errors="coerce")
+    if "package_created_at" in df.columns and df["package_created_at"].notna().any():
+        created_dt = pd.to_datetime(df["package_created_at"], utc=True, errors="coerce").dropna().min()
+    else:
+        created_dt = pd.NaT
+
     pkg_age_days = max(0.0, (cutoff - created_dt).total_seconds() / 86400.0) if pd.notna(created_dt) else np.nan
     days_since_last = max(0.0, (cutoff - last_row["_pub_dt"]).total_seconds() / 86400.0) if pd.notna(last_row["_pub_dt"]) else np.nan
-    days_since_first = max(0.0, (cutoff - first_row["_pub_dt"]).total_seconds() / 86400.0) if pd.notna(first_row["_pub_dt"]) else np.nan
+    earliest_pub = df["_pub_dt"].dropna().min() if df["_pub_dt"].notna().any() else pd.NaT
+    days_since_first = max(0.0, (cutoff - earliest_pub).total_seconds() / 86400.0) if pd.notna(earliest_pub) else np.nan
     release_span = max(0.0, days_since_first - days_since_last) if pd.notna(days_since_first) and pd.notna(days_since_last) else 0.0
 
     feats["num_versions_12m"] = float(n_versions)

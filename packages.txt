@@ -1,4 +1,3 @@
-# High-Risk / Historical Vulnerabilities (Signal Generators)
 ua-parser-js
 tar
 tar-fs
@@ -26,7 +25,6 @@ mixin-deep
 dot-prop
 lodash
 underscore
-# Massive Velocity & Core Frameworks
 typescript
 react
 react-dom
@@ -61,7 +59,6 @@ sqlite3
 redis
 ioredis
 socket.io
-# Foundational Utilities & Tooling
 chalk
 colors
 commander
@@ -96,7 +93,6 @@ body-parser
 cors
 helmet
 cookie-parser
-# Build Tools, Bundlers & Compilers
 webpack
 rollup
 parcel
@@ -116,7 +112,6 @@ nodemon
 concurrently
 lerna
 nx
-# Testing & Linting
 jest
 mocha
 chai
@@ -136,7 +131,6 @@ tape
 sinon
 nyc
 istanbul
-# Broad Ecosystem & Dependencies
 prop-types
 classnames
 styled-components
@@ -280,7 +274,6 @@ random-bytes
 rndm
 csrf
 csurf
-#curated list end.
 babel-runtime
 jquery
 yeoman-generator
@@ -327,7 +320,6 @@ sass-loader
 vue-router
 co
 eslint-plugin-jsx-a11y
-nan
 optimist
 promise
 @angular/animations

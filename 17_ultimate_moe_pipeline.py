@@ -3,6 +3,7 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
+from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
@@ -255,22 +256,79 @@ def train_ultimate(data_path: str = "engineered_dataset.csv"):
         print(f"\nRound 1 (dompurify) | GT [1,1,0,0] | Pred {[round(float(v), 2) for v in pred_r1[:4]]} | Euclid: {r1_d:.4f} ({sim.simulated_rank(r1_d)}) | Gate g: {g_r1:.2f}")
 
 
-def predict_file(input_csv: str, cutoff_date: str = "2026-07-01", output_csv: str | None = None, quiet: bool = False):
-    bundle = joblib.load(ARTIFACT_PATH)
-    raw_df = pd.read_csv(input_csv)
-    X_full = pd.DataFrame([transform_package_df(raw_df, cutoff_date=cutoff_date)])
+def load_all_bundles(models_dir: str | Path | None = None) -> dict:
+    if models_dir is None:
+        models_dir = Path(__file__).resolve().parent / "models"
+    else:
+        models_dir = Path(models_dir)
+    b06 = joblib.load(models_dir / "pcom_ensemble.pkl")
+    b07 = joblib.load(models_dir / "pcom_ensemble_tuned.pkl")
+    b10 = joblib.load(models_dir / "pcom_final_ensemble.pkl")
+    bmoe = joblib.load(models_dir / "pcom_ultimate_moe.pkl")
+    return {"b06": b06, "b07": b07, "b10": b10, "bmoe": bmoe}
 
-    p06 = m06.predict_file(input_csv, cutoff_date=cutoff_date, quiet=True)
-    p07 = m07.predict_file(input_csv, cutoff_date=cutoff_date, quiet=True)
-    p10 = m10.predict_file(input_csv, cutoff_date=cutoff_date, quiet=True)
 
-    # Risk Gate
+def predict_dataframe(df: pd.DataFrame, cutoff_date: str = "2026-07-01", preloaded_bundles: dict | None = None) -> tuple[np.ndarray, float]:
+    if preloaded_bundles is None:
+        preloaded_bundles = load_all_bundles()
+
+    b06 = preloaded_bundles["b06"]
+    b07 = preloaded_bundles["b07"]
+    b10 = preloaded_bundles["b10"]
+    bundle = preloaded_bundles["bmoe"]
+
+    feats = transform_package_df(df, cutoff_date=cutoff_date)
+    X_full = pd.DataFrame([feats])
+
+    # 1. Sub-model 06
+    X06 = X_full[b06["feature_cols"]]
+    p06 = np.zeros(len(TARGET_COLS), dtype=float)
+    for t_i in range(len(TARGET_COLS)):
+        w = b06["weights"][t_i]
+        if np.all(w == 0):
+            continue
+        m_preds = [
+            float(np.mean([m06._predict_one(fm, m_name, X06)[0] for fm in b06["fitted_models"][t_i][m_name]]))
+            if w[m_i] >= 1e-6 else 0.0
+            for m_i, m_name in enumerate(b06["model_names"])
+        ]
+        p06[t_i] = max(0.0, float(np.dot(w, m_preds)))
+
+    # 2. Sub-model 07
+    p07 = np.zeros(len(TARGET_COLS), dtype=float)
+    for t_i in range(len(TARGET_COLS)):
+        w = b07["weights"][t_i]
+        if np.all(w == 0):
+            continue
+        X_sub = X_full[b07["selected_features"][t_i]]
+        m_preds = [
+            float(np.mean([m07._predict_one(fm, m_name, X_sub)[0] for fm in b07["fitted_models"][t_i][m_name]]))
+            if w[m_i] >= 1e-6 else 0.0
+            for m_i, m_name in enumerate(b07["model_names"])
+        ]
+        p07[t_i] = max(0.0, float(np.dot(w, m_preds)))
+
+    # 3. Sub-model 10
+    p10 = np.zeros(len(TARGET_COLS), dtype=float)
+    for t_i in range(len(TARGET_COLS)):
+        w = b10["weights"][t_i]
+        if np.all(w == 0):
+            continue
+        X_sub = X_full[b10["selected_features"][t_i]]
+        m_preds = [
+            float(np.mean([m10._predict_one(m, m_name, X_sub)[0] for m in b10["fitted_models"][t_i][m_name]]))
+            if w[m_i] >= 1e-6 else 0.0
+            for m_i, m_name in enumerate(b10["model_names"])
+        ]
+        p10[t_i] = max(0.0, float(np.dot(w, m_preds)))
+
+    # 4. Risk Gate
     X_u = X_full[bundle["union_feats"]]
     p_gate = float(np.mean([clf.predict_proba(X_u)[0, 1] for clf in bundle["gate_models"]]))
     a, c, g_max = bundle["gate_params"]
     g = float(g_max * sigmoid(a * (p_gate - c)))
 
-    # SOTA paradigms
+    # 5. SOTA paradigms
     p_sota = np.zeros((5, len(SOTA_NAMES)), dtype=float)
     for m_i, m_name in enumerate(SOTA_NAMES):
         for t_i in range(4):
@@ -278,7 +336,7 @@ def predict_file(input_csv: str, cutoff_date: str = "2026-07-01", output_csv: st
             objs = bundle["sota_models"][t_i][m_name]
             p_sota[t_i, m_i] = float(np.mean([predict_sota_one(m_name, obj, X_sub)[0] for obj in objs]))
 
-    # Multi-scale Cosine kNN
+    # 6. Multi-scale Cosine kNN
     p_knn = np.zeros(5, dtype=float)
     for t_i in range(4):
         X_sub = X_full[bundle["sel_feats"][t_i]]
@@ -296,9 +354,15 @@ def predict_file(input_csv: str, cutoff_date: str = "2026-07-01", output_csv: st
     p_aggr[:4] = np.einsum("tm,tm->t", cand[:4, :], bundle["W_aggr"])
 
     final_pred = np.clip((1.0 - g) * p_cons + g * p_aggr, 0.0, None)
+    return final_pred, g
+
+
+def predict_file(input_csv: str, cutoff_date: str = "2026-07-01", output_csv: str | None = None, quiet: bool = False):
+    raw_df = pd.read_csv(input_csv)
+    final_pred, g = predict_dataframe(raw_df, cutoff_date=cutoff_date)
 
     if not quiet:
-        print(f"\n=== ULTIMATE MoE PREDICTION FOR {input_csv} (Gate P={p_gate:.3f}, g={g:.2f}) ===")
+        print(f"\n=== ULTIMATE MoE PREDICTION FOR {input_csv} (Gate g={g:.2f}) ===")
         for col, val in zip(TARGET_COLS, final_pred):
             print(f"  {col:<32}: {val:.6f}")
 
