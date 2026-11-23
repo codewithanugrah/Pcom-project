@@ -13,26 +13,23 @@ import uvicorn
 from fastapi import BackgroundTasks, FastAPI
 from pydantic import BaseModel
 
-from features import TARGET_COLS
+from champion_model import ChampionForecaster, TARGET_COLS
 
 BASE_DIR = Path(__file__).resolve().parent
 os.chdir(BASE_DIR)
 
 app = FastAPI(title="PCOM-01 Vulnerability Forecasting API")
 
-# Import inference engine and pre-load all model bundles at server startup
-from importlib import import_module
-moe = import_module("17_ultimate_moe_pipeline")
-
-print("[STARTUP] Pre-loading Soft-Capped Risk-Gated MoE model bundles into memory...", flush=True)
+# Pre-load champion ensemble into memory at startup
+print("[STARTUP] Pre-loading Champion Poisson Ensemble into memory...", flush=True)
 _t_load = time.time()
 try:
-    MODEL_BUNDLES = moe.load_all_bundles(models_dir=BASE_DIR / "models")
-    print(f"[STARTUP] Successfully loaded all models in {time.time() - _t_load:.2f}s. Service ready for Round 3!", flush=True)
+    forecaster = ChampionForecaster(model_path=BASE_DIR / "models" / "pcom_champion_ensemble.joblib")
+    print(f"[STARTUP] Successfully loaded champion ensemble in {time.time() - _t_load:.2f}s. Service ready for Round 3!", flush=True)
 except Exception as e:
-    print(f"[STARTUP ERROR] Failed to pre-load model bundles: {e}", flush=True)
+    print(f"[STARTUP ERROR] Failed to pre-load champion ensemble: {e}", flush=True)
     traceback.print_exc()
-    MODEL_BUNDLES = None
+    forecaster = None
 
 
 class EvaluationBody(BaseModel):
@@ -56,7 +53,7 @@ def _infer_cutoff_date(df: pd.DataFrame) -> str:
 
 def run_model(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Executes in-memory inference using the Soft-Capped Risk-Gated MoE pipeline
+    Executes in-memory inference using the Champion Poisson Ensemble
     on package time-series data and produces a single-row prediction DataFrame
     with exact columns: target_ghsa_low_count_90d, ..., target_ghsa_unknown_count_90d.
     Values are guaranteed to be finite, non-negative float64 (>= 0.0).
@@ -66,8 +63,11 @@ def run_model(df: pd.DataFrame) -> pd.DataFrame:
 
     cutoff_str = _infer_cutoff_date(df)
     try:
-        final_pred, g_val = moe.predict_dataframe(df, cutoff_date=cutoff_str, preloaded_bundles=MODEL_BUNDLES)
-        preds = np.asarray(final_pred, dtype=float).ravel()
+        if forecaster is not None:
+            pred_df, _ = forecaster.predict(df, cutoff_date=cutoff_str)
+            preds = pred_df[TARGET_COLS].iloc[0].values
+        else:
+            preds = np.zeros(len(TARGET_COLS), dtype=float)
     except Exception as exc:
         print(f"[ERROR] Inference exception in run_model: {exc}", flush=True)
         traceback.print_exc(file=sys.stdout)
@@ -177,7 +177,7 @@ async def prediction(payload: EvaluationBody, background_tasks: BackgroundTasks)
 
 @app.get("/health", status_code=200)
 async def health():
-    models_ready = MODEL_BUNDLES is not None
+    models_ready = forecaster is not None and forecaster.bundle is not None
     return {"health": "up", "models_ready": models_ready}
 
 

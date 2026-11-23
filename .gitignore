@@ -18,7 +18,9 @@ venv/
 # Competition runtime captures
 captured_inputs/
 
-# Model binaries (preserved on disk)
-models/
+# Model binaries (ignore heavy local files, but track champion ensemble)
+models/*
+!models/pcom_champion_ensemble.joblib
 *.pkl
-*.joblib
+
+deploy.txt

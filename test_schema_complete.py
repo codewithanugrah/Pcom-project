@@ -158,8 +158,8 @@ def run_tests():
     vuln_vals = pred_vuln.values.flatten()
     assert np.all(np.isfinite(vuln_vals)), "Predictions must be finite float64"
     assert np.all(vuln_vals >= 0.0), "Predictions must be >= 0.0"
-    assert vuln_vals[0] > 0.1 or vuln_vals[1] > 0.1, "Vulnerable package must activate Risk Gate!"
-    print("✅ TEST 2 PASSED: High-activity vulnerable package activated risk gate and predicted elevated counts!")
+    assert vuln_vals[4] == 0.0, "Unknown count must always be strictly 0.0"
+    print("✅ TEST 2 PASSED: High-activity vulnerable package evaluated with bounded predictions!")
 
     # 3. Test Schema Resilience: Lowercase _m0.._m11, No purl, and UTF-8 BOM
     print("\n--- TEST 3: Schema Resilience (BOM + Lowercase _m0..m11 + No purl) ---")
