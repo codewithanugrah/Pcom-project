@@ -15,8 +15,10 @@ venv/
 .vscode/
 .DS_Store
 
-# Competition runtime captures
+# Competition runtime captures & logs
 captured_inputs/
+scratch/
+archive/
 
 # Datasets & Training Data (Strictly confidential - never commit data)
 *.csv
@@ -29,8 +31,9 @@ captured_inputs/
 completed_packages.txt
 failed_packages.txt
 extra_packages*.txt
+packages.txt
 
-# Model binaries (ignore heavy local checkpoints, track only production artifact)
+# Model binaries (ignore local heavy checkpoints, track only production artifact)
 models/*
 !models/pcom_champion_ensemble.joblib
 *.pkl
