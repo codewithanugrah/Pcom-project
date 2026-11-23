@@ -187,10 +187,15 @@ class ChampionForecaster:
             s2 = self.bundle[key_b][target]
             v2 = s2["value"] if s2["type"] == "constant" else float(s2["estimator"].predict(X)[0])
 
-            # Weighted hierarchical ensemble
+            # Weighted hierarchical ensemble (supports target-specific or global weights)
             weights = self.bundle.get("blend_weights", {})
-            w1 = weights.get("anchor", weights.get("d1", 0.5))
-            w2 = weights.get("distribution", weights.get("d2", 0.5))
+            if target in weights and isinstance(weights[target], dict):
+                tw = weights[target]
+                w1 = tw.get("anchor", tw.get("d1", 0.5))
+                w2 = tw.get("distribution", tw.get("d2", 0.5))
+            else:
+                w1 = weights.get("anchor", weights.get("d1", 0.5))
+                w2 = weights.get("distribution", weights.get("d2", 0.5))
             v_blend = w1 * v1 + w2 * v2
 
             # Soft cap protection against squared error blowouts
