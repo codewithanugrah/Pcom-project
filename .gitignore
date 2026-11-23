@@ -18,9 +18,23 @@ venv/
 # Competition runtime captures
 captured_inputs/
 
-# Model binaries (ignore heavy local files, but track champion ensemble)
+# Datasets & Training Data (Strictly confidential - never commit data)
+*.csv
+*.tsv
+*.sqlite
+*.sqlite3
+*.db
+*.parquet
+*.jsonl
+completed_packages.txt
+failed_packages.txt
+extra_packages*.txt
+
+# Model binaries (ignore heavy local checkpoints, track only production artifact)
 models/*
 !models/pcom_champion_ensemble.joblib
 *.pkl
 
 deploy.txt
+.env
+catboost_info/

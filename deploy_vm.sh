@@ -10,7 +10,8 @@ echo "🚀 PCOM-01 VM Deployment Pipeline (Local -> GitHub -> VM)"
 echo "=========================================================="
 
 echo "1. Pushing latest local commits and tags to GitHub..."
-git push origin main --tags
+git push origin main
+git push origin --tags --force
 
 echo "2. Pulling latest code on remote VM ($VM_IP)..."
 ssh -i "$KEY_PATH" -o StrictHostKeyChecking=no ubuntu@"$VM_IP" "cd $REPO_DIR && git pull origin main"
